@@ -111,10 +111,10 @@ int main(int argc, char** argv) {
 
     sehandle = selabel_open(SELABEL_CTX_FILE, seopts, 1);
 
-    if (!sehandle) {
-        fprintf(stderr, "Warning:  No file_contexts\n");
-        fprintf(cmd_pipe, "ui_print Warning: No file_contexts\n");
-    }
+//    if (!sehandle) {
+//        fprintf(stderr, "Warning:  No file_contexts\n");
+//        fprintf(cmd_pipe, "ui_print Warning: No file_contexts\n");
+//    }
 
     // Evaluate the parsed script.
 
