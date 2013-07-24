@@ -421,18 +421,111 @@ int WriteToPartition(unsigned char* data, size_t len,
             break;
 
         case EMMC:
-            ;
-            FILE* f = fopen(partition, "wb");
-            if (fwrite(data, 1, len, f) != len) {
-                printf("short write writing to %s (%s)\n",
-                       partition, strerror(errno));
+        {
+            size_t start = 0;
+            int success = 0;
+            int fd = open(partition, O_RDWR | O_SYNC);
+            if (fd < 0) {
+                printf("failed to open %s: %s\n", partition, strerror(errno));
                 return -1;
             }
-            if (fclose(f) != 0) {
+            int attempt;
+
+            for (attempt = 0; attempt < 10; ++attempt) {
+                size_t next_sync = start + (1<<20);
+                printf("raw O_SYNC write %s attempt %d start at %d\n", partition, attempt+1, start);
+                lseek(fd, start, SEEK_SET);
+                while (start < len) {
+                    size_t to_write = len - start;
+                    if (to_write > 4096) to_write = 4096;
+
+                    ssize_t written = write(fd, data+start, to_write);
+                    if (written < 0) {
+                        if (errno == EINTR) {
+                            written = 0;
+                        } else {
+                            printf("failed write writing to %s (%s)\n",
+                                   partition, strerror(errno));
+                            return -1;
+                        }
+                    }
+                    start += written;
+                    if (start >= next_sync) {
+                        fsync(fd);
+                        next_sync = start + (1<<20);
+                    }
+                }
+                fsync(fd);
+
+                // drop caches so our subsequent verification read
+                // won't just be reading the cache.
+                sync();
+                int dc = open("/proc/sys/vm/drop_caches", O_WRONLY);
+                write(dc, "3\n", 2);
+                close(dc);
+                sleep(1);
+                printf("  caches dropped\n");
+
+                // verify
+                lseek(fd, 0, SEEK_SET);
+                unsigned char buffer[4096];
+                start = len;
+                size_t p;
+                for (p = 0; p < len; p += sizeof(buffer)) {
+                    size_t to_read = len - p;
+                    if (to_read > sizeof(buffer)) to_read = sizeof(buffer);
+
+                    size_t so_far = 0;
+                    while (so_far < to_read) {
+                        ssize_t read_count = read(fd, buffer+so_far, to_read-so_far);
+                        if (read_count < 0) {
+                            if (errno == EINTR) {
+                                read_count = 0;
+                            } else {
+                                printf("verify read error %s at %d: %s\n",
+                                       partition, p, strerror(errno));
+                                return -1;
+                            }
+                        }
+                        if ((size_t)read_count < to_read) {
+                            printf("short verify read %s at %d: %d %d %s\n",
+                                   partition, p, read_count, to_read, strerror(errno));
+                        }
+                        so_far += read_count;
+                    }
+
+                    if (memcmp(buffer, data+p, to_read)) {
+                        printf("verification failed starting at %d\n", p);
+                        start = p;
+                        break;
+                    }
+                }
+
+                if (start == len) {
+                    printf("verification read succeeded (attempt %d)\n", attempt+1);
+                    success = true;
+                    break;
+                }
+
+                sleep(2);
+            }
+
+            if (!success) {
+                printf("failed to verify after all attempts\n");
+                return -1;
+            }
+
+            if (close(fd) != 0) {
                 printf("error closing %s (%s)\n", partition, strerror(errno));
                 return -1;
             }
+            // hack: sync and sleep after closing in hopes of getting
+            // the data actually onto flash.
+            printf("sleeping after close\n");
+            sync();
+            sleep(5);
             break;
+        }
     }
 
     free(copy);
@@ -473,7 +566,7 @@ int ParseSha1(const char* str, uint8_t* digest) {
 // Search an array of sha1 strings for one matching the given sha1.
 // Return the index of the match on success, or -1 if no match is
 // found.
-int FindMatchingPatch(uint8_t* sha1, const char** patch_sha1_str,
+int FindMatchingPatch(uint8_t* sha1, char* const * const patch_sha1_str,
                       int num_patches) {
     int i;
     uint8_t patch_sha1[SHA_DIGEST_SIZE];
@@ -585,6 +678,14 @@ int CacheSizeCheck(size_t bytes) {
     }
 }
 
+static void print_short_sha1(const uint8_t sha1[SHA_DIGEST_SIZE]) {
+    int i;
+    const char* hex = "0123456789abcdef";
+    for (i = 0; i < 4; ++i) {
+        putchar(hex[(sha1[i]>>4) & 0xf]);
+        putchar(hex[sha1[i] & 0xf]);
+    }
+}
 
 // This function applies binary patches to files in a way that is safe
 // (the original file is not touched until we have the desired
@@ -620,7 +721,7 @@ int applypatch(const char* source_filename,
                char** const patch_sha1_str,
                Value** patch_data,
                Value* bonus_data) {
-    printf("\napplying patch to %s\n", source_filename);
+    printf("patch %s: ", source_filename);
 
     if (target_filename[0] == '-' &&
         target_filename[1] == '\0') {
@@ -646,8 +747,9 @@ int applypatch(const char* source_filename,
         if (memcmp(source_file.sha1, target_sha1, SHA_DIGEST_SIZE) == 0) {
             // The early-exit case:  the patch was already applied, this file
             // has the desired hash, nothing for us to do.
-            printf("\"%s\" is already target; no patch needed\n",
-                   target_filename);
+            printf("already ");
+            print_short_sha1(target_sha1);
+            putchar('\n');
             free(source_file.data);
             return 0;
         }
@@ -769,8 +871,10 @@ static int GenerateTarget(FileContents* source_file,
                 enough_space =
                     (free_space > (256 << 10)) &&          // 256k (two-block) minimum
                     (free_space > (target_size * 3 / 2));  // 50% margin of error
-                printf("target %ld bytes; free space %ld bytes; retry %d; enough %d\n",
-                       (long)target_size, (long)free_space, retry, enough_space);
+                if (!enough_space) {
+                    printf("target %ld bytes; free space %ld bytes; retry %d; enough %d\n",
+                           (long)target_size, (long)free_space, retry, enough_space);
+                }
             }
 
             if (!enough_space) {
@@ -805,7 +909,7 @@ static int GenerateTarget(FileContents* source_file,
                 unlink(source_filename);
 
                 size_t free_space = FreeSpaceForFile(target_fs);
-                printf("(now %ld bytes free for target)\n", (long)free_space);
+                printf("(now %ld bytes free for target) ", (long)free_space);
             }
         }
 
@@ -901,6 +1005,10 @@ static int GenerateTarget(FileContents* source_file,
     if (memcmp(current_target_sha1, target_sha1, SHA_DIGEST_SIZE) != 0) {
         printf("patch did not produce expected sha1\n");
         return 1;
+    } else {
+        printf("now ");
+        print_short_sha1(target_sha1);
+        putchar('\n');
     }
 
     if (output < 0) {

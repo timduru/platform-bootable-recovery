@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 
+#include "common.h"
 #include "verifier.h"
 #include "ui.h"
 
@@ -113,13 +114,10 @@ class FakeUI : public RecoveryUI {
     bool IsTextVisible() { return false; }
     bool WasTextEverVisible() { return false; }
     void Print(const char* fmt, ...) {
-        char buf[256];
         va_list ap;
         va_start(ap, fmt);
-        vsnprintf(buf, 256, fmt, ap);
+        vfprintf(stderr, fmt, ap);
         va_end(ap);
-
-        fputs(buf, stderr);
     }
 
     void StartMenu(const char* const * headers, const char* const * items,
@@ -128,22 +126,35 @@ class FakeUI : public RecoveryUI {
     void EndMenu() { }
 };
 
+void
+ui_print(const char* format, ...) {
+    va_list ap;
+    va_start(ap, format);
+    vfprintf(stdout, format, ap);
+    va_end(ap);
+}
+
 int main(int argc, char **argv) {
-    if (argc != 2 && argc != 3) {
-        fprintf(stderr, "Usage: %s [-f4] <package>\n", argv[0]);
+    if (argc < 2 || argc > 4) {
+        fprintf(stderr, "Usage: %s [-f4 | -file <keys>] <package>\n", argv[0]);
         return 2;
     }
 
     RSAPublicKey* key = &test_key;
+    int num_keys = 1;
     ++argv;
     if (strcmp(argv[0], "-f4") == 0) {
         ++argv;
         key = &test_f4_key;
+    } else if (strcmp(argv[0], "-file") == 0) {
+        ++argv;
+        key = load_keys(argv[0], &num_keys);
+        ++argv;
     }
 
     ui = new FakeUI();
 
-    int result = verify_file(*argv, key, 1);
+    int result = verify_file(*argv, key, num_keys);
     if (result == VERIFY_SUCCESS) {
         printf("SUCCESS\n");
         return 0;
