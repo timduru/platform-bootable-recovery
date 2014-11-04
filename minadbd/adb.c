@@ -387,20 +387,10 @@ int adb_main()
     init_transport_registration();
 
     // The minimal version of adbd only uses USB.
-    if (access("/dev/android_adb", F_OK) == 0) {
+    if (access(USB_ADB_PATH, F_OK) == 0 || access(USB_FFS_ADB_EP0, F_OK) == 0) {
         // listen on USB
         usb_init();
     }
-
-    if (setgid(AID_SHELL) != 0) {
-        fprintf(stderr, "failed to setgid to shell\n");
-        exit(1);
-    }
-    if (setuid(AID_SHELL) != 0) {
-        fprintf(stderr, "failed to setuid to shell\n");
-        exit(1);
-    }
-    fprintf(stderr, "userid is %d\n", getuid());
 
     D("Event loop starting\n");
 
