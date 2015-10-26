@@ -111,9 +111,10 @@ int ensure_path_mounted(const char* path) {
         }
         return mtd_mount_partition(partition, v->mount_point, v->fs_type, 0);
     } else if (strcmp(v->fs_type, "ext4") == 0 ||
+               strcmp(v->fs_type, "squashfs") == 0 ||
                strcmp(v->fs_type, "vfat") == 0) {
         result = mount(v->blk_device, v->mount_point, v->fs_type,
-                       MS_NOATIME | MS_NODEV | MS_NODIRATIME, "");
+                       v->flags, v->fs_options);
         if (result == 0) return 0;
 
         LOGE("failed to mount %s (%s)\n", v->mount_point, strerror(errno));

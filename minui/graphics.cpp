@@ -16,6 +16,7 @@
 
 #include <stdbool.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 #include <fcntl.h>
@@ -34,11 +35,11 @@
 #include "minui.h"
 #include "graphics.h"
 
-typedef struct {
+struct GRFont {
     GRSurface* texture;
     int cwidth;
     int cheight;
-} GRFont;
+};
 
 static GRFont* gr_font = NULL;
 static minui_backend* gr_backend = NULL;
@@ -46,8 +47,6 @@ static minui_backend* gr_backend = NULL;
 static int overscan_percent = OVERSCAN_PERCENT;
 static int overscan_offset_x = 0;
 static int overscan_offset_y = 0;
-
-static int gr_vt_fd = -1;
 
 static unsigned char gr_current_r = 255;
 static unsigned char gr_current_g = 255;
@@ -76,11 +75,10 @@ static void text_blend(unsigned char* src_p, int src_row_bytes,
                        unsigned char* dst_p, int dst_row_bytes,
                        int width, int height)
 {
-    int i, j;
-    for (j = 0; j < height; ++j) {
+    for (int j = 0; j < height; ++j) {
         unsigned char* sx = src_p;
         unsigned char* px = dst_p;
-        for (i = 0; i < width; ++i) {
+        for (int i = 0; i < width; ++i) {
             unsigned char a = *sx++;
             if (gr_current_a < 255) a = ((int)a * gr_current_a) / 255;
             if (a == 255) {
@@ -105,34 +103,33 @@ static void text_blend(unsigned char* src_p, int src_row_bytes,
     }
 }
 
-
-void gr_text(int x, int y, const char *s, int bold)
+void gr_text(int x, int y, const char *s, bool bold)
 {
-    GRFont *font = gr_font;
-    unsigned off;
+    GRFont* font = gr_font;
 
-    if (!font->texture) return;
-    if (gr_current_a == 0) return;
+    if (!font->texture || gr_current_a == 0) return;
 
     bold = bold && (font->texture->height != font->cheight);
 
     x += overscan_offset_x;
     y += overscan_offset_y;
 
-    while((off = *s++)) {
-        off -= 32;
+    unsigned char ch;
+    while ((ch = *s++)) {
         if (outside(x, y) || outside(x+font->cwidth-1, y+font->cheight-1)) break;
-        if (off < 96) {
 
-            unsigned char* src_p = font->texture->data + (off * font->cwidth) +
-                (bold ? font->cheight * font->texture->row_bytes : 0);
-            unsigned char* dst_p = gr_draw->data + y*gr_draw->row_bytes + x*gr_draw->pixel_bytes;
-
-            text_blend(src_p, font->texture->row_bytes,
-                       dst_p, gr_draw->row_bytes,
-                       font->cwidth, font->cheight);
-
+        if (ch < ' ' || ch > '~') {
+            ch = '?';
         }
+
+        unsigned char* src_p = font->texture->data + ((ch - ' ') * font->cwidth) +
+                               (bold ? font->cheight * font->texture->row_bytes : 0);
+        unsigned char* dst_p = gr_draw->data + y*gr_draw->row_bytes + x*gr_draw->pixel_bytes;
+
+        text_blend(src_p, font->texture->row_bytes,
+                   dst_p, gr_draw->row_bytes,
+                   font->cwidth, font->cheight);
+
         x += font->cwidth;
     }
 }
@@ -160,22 +157,27 @@ void gr_texticon(int x, int y, GRSurface* icon) {
 
 void gr_color(unsigned char r, unsigned char g, unsigned char b, unsigned char a)
 {
+#if defined(RECOVERY_ABGR) || defined(RECOVERY_BGRA)
+    gr_current_r = b;
+    gr_current_g = g;
+    gr_current_b = r;
+    gr_current_a = a;
+#else
     gr_current_r = r;
     gr_current_g = g;
     gr_current_b = b;
     gr_current_a = a;
+#endif
 }
 
 void gr_clear()
 {
-    if (gr_current_r == gr_current_g &&
-        gr_current_r == gr_current_b) {
+    if (gr_current_r == gr_current_g && gr_current_r == gr_current_b) {
         memset(gr_draw->data, gr_current_r, gr_draw->height * gr_draw->row_bytes);
     } else {
-        int x, y;
         unsigned char* px = gr_draw->data;
-        for (y = 0; y < gr_draw->height; ++y) {
-            for (x = 0; x < gr_draw->width; ++x) {
+        for (int y = 0; y < gr_draw->height; ++y) {
+            for (int x = 0; x < gr_draw->width; ++x) {
                 *px++ = gr_current_r;
                 *px++ = gr_current_g;
                 *px++ = gr_current_b;
@@ -267,7 +269,7 @@ unsigned int gr_get_height(GRSurface* surface) {
 
 static void gr_init_font(void)
 {
-    gr_font = calloc(sizeof(*gr_font), 1);
+    gr_font = reinterpret_cast<GRFont*>(calloc(sizeof(*gr_font), 1));
 
     int res = res_create_alpha_surface("font", &(gr_font->texture));
     if (res == 0) {
@@ -280,14 +282,14 @@ static void gr_init_font(void)
         printf("failed to read font: res=%d\n", res);
 
         // fall back to the compiled-in font.
-        gr_font->texture = malloc(sizeof(*gr_font->texture));
+        gr_font->texture = reinterpret_cast<GRSurface*>(malloc(sizeof(*gr_font->texture)));
         gr_font->texture->width = font.width;
         gr_font->texture->height = font.height;
         gr_font->texture->row_bytes = font.width;
         gr_font->texture->pixel_bytes = 1;
 
-        unsigned char* bits = malloc(font.width * font.height);
-        gr_font->texture->data = (void*) bits;
+        unsigned char* bits = reinterpret_cast<unsigned char*>(malloc(font.width * font.height));
+        gr_font->texture->data = reinterpret_cast<unsigned char*>(bits);
 
         unsigned char data;
         unsigned char* in = font.rundata;
@@ -324,7 +326,7 @@ static void gr_test() {
         gr_clear();
 
         gr_color(255, 0, 0, 255);
-        gr_surface frame = images[x%frames];
+        GRSurface* frame = images[x%frames];
         gr_blit(frame, 0, 0, frame->width, frame->height, x, 0);
 
         gr_color(255, 0, 0, 128);
@@ -358,23 +360,17 @@ int gr_init(void)
 {
     gr_init_font();
 
-    gr_vt_fd = open("/dev/tty0", O_RDWR | O_SYNC);
-    if (gr_vt_fd < 0) {
-        // This is non-fatal; post-Cupcake kernels don't have tty0.
-        perror("can't open /dev/tty0");
-    } else if (ioctl(gr_vt_fd, KDSETMODE, (void*) KD_GRAPHICS)) {
-        // However, if we do open tty0, we expect the ioctl to work.
-        perror("failed KDSETMODE to KD_GRAPHICS on tty0");
-        gr_exit();
-        return -1;
-    }
-
     gr_backend = open_adf();
     if (gr_backend) {
         gr_draw = gr_backend->init(gr_backend);
         if (!gr_draw) {
             gr_backend->exit(gr_backend);
         }
+    }
+
+    if (!gr_draw) {
+        gr_backend = open_drm();
+        gr_draw = gr_backend->init(gr_backend);
     }
 
     if (!gr_draw) {
@@ -397,10 +393,6 @@ int gr_init(void)
 void gr_exit(void)
 {
     gr_backend->exit(gr_backend);
-
-    ioctl(gr_vt_fd, KDSETMODE, (void*) KD_TEXT);
-    close(gr_vt_fd);
-    gr_vt_fd = -1;
 }
 
 int gr_fb_width(void)
